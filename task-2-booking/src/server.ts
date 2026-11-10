@@ -1,35 +1,108 @@
-import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { masters, services } from './store.ts';
+import {
+  createServer,
+  type IncomingMessage,
+  type ServerResponse,
+} from "node:http";
+import { bookingRepo, masters, services } from "./store.ts";
+import { getSlots } from "./slots.ts";
+import { isValidDate } from "./time.ts";
+import { cancelBooking, createBooking } from "./bookings.ts";
+import { now } from "./clock.ts";
 
 const port = Number(process.env.PORT ?? 3002);
 
 const server = createServer(async (req, res) => {
-  const url = new URL(req.url ?? '/', 'http://localhost');
+  const url = new URL(req.url ?? "/", "http://localhost");
+  const parts = url.pathname.split("/").filter(Boolean);
 
   try {
-    if (req.method === 'GET' && url.pathname === '/masters') {
+    // GET /masters
+    if (req.method === "GET" && url.pathname === "/masters") {
       return send(res, 200, masters);
     }
 
-    if (req.method === 'GET' && url.pathname === '/services') {
+    // GET /services
+    if (req.method === "GET" && url.pathname === "/services") {
       return send(res, 200, services);
     }
 
-    send(res, 404, { error: 'not_found' });
+    // GET /masters/:id/slots?serviceId=s-cut&date=2030-11-18
+    if (
+      req.method === "GET" &&
+      parts.length === 3 &&
+      parts[0] === "masters" &&
+      parts[2] === "slots"
+    ) {
+      const masterId = parts[1];
+      const serviceId = url.searchParams.get("serviceId");
+      const date = url.searchParams.get("date");
+
+      if (serviceId === null || serviceId === "") {
+        return send(res, 400, { error: "service_id_required" });
+      }
+      if (date === null || !isValidDate(date)) {
+        return send(res, 400, { error: "invalid_date" });
+      }
+
+      const master = masters.find((m) => m.id === masterId);
+      if (!master) {
+        return send(res, 404, { error: "master_not_found" });
+      }
+      const service = services.find((s) => s.id === serviceId);
+      if (!service) {
+        return send(res, 404, { error: "service_not_found" });
+      }
+      if (!service.masterIds.includes(master.id)) {
+        return send(res, 400, { error: "master_does_not_provide_service" });
+      }
+
+      const bookings = await bookingRepo.listByMaster(master.id);
+      const slots = getSlots(master, service, date, bookings, now());
+      return send(res, 200, {
+        masterId: master.id,
+        serviceId: service.id,
+        date: date,
+        slots: slots,
+      });
+    }
+
+    // POST /bookings
+    if (req.method === "POST" && url.pathname === "/bookings") {
+      let body: unknown;
+      try {
+        body = await readJson(req);
+      } catch {
+        return send(res, 400, { error: "invalid_json" });
+      }
+      const result = await createBooking(body);
+      return send(res, result.status, result.body);
+    }
+
+    // DELETE /bookings/:id
+    if (
+      req.method === "DELETE" &&
+      parts.length === 2 &&
+      parts[0] === "bookings"
+    ) {
+      const result = await cancelBooking(parts[1]);
+      return send(res, result.status, result.body);
+    }
+
+    send(res, 404, { error: "not_found" });
   } catch (err) {
     console.error(err);
-    send(res, 500, { error: 'internal' });
+    send(res, 500, { error: "internal" });
   }
 });
 
 async function readJson(req: IncomingMessage): Promise<unknown> {
-  let raw = '';
+  let raw = "";
   for await (const chunk of req) raw += chunk;
   return raw ? JSON.parse(raw) : null;
 }
 
 function send(res: ServerResponse, status: number, body: unknown) {
-  res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' });
+  res.writeHead(status, { "content-type": "application/json; charset=utf-8" });
   res.end(JSON.stringify(body));
 }
 
